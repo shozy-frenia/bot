@@ -15,7 +15,12 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKe
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ===== НАСТРОЙКИ =====
-TOKEN = "8380644096:AAER5ZYG4AKJghEYta9mGhiB0CnSitmTYKY"  # используем токен из первого бота (aiogram)
+# Токен теперь читается из переменной окружения (безопасно)TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("BOT_TOKEN не задан в переменных окружения!")
+# ВАЖНО: замените токен на новый через @BotFather и удалите эту строку, используйте только переменные окружения!
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -26,15 +31,23 @@ HISTORY_FILE = "history.json"
 def load_history(user_id: int) -> list:
     if not os.path.exists(HISTORY_FILE):
         return []
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get(str(user_id), [])
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get(str(user_id), [])
+    except json.JSONDecodeError:
+        # Если файл повреждён, начинаем заново
+        logger.warning(f"Файл {HISTORY_FILE} повреждён, создаём новый.")
+        return []
 
 def save_history_entry(user_id: int, entry: dict):
     data = {}
     if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            data = {}  # если битый, перезаписываем
     uid = str(user_id)
     if uid not in data:
         data[uid] = []
@@ -130,18 +143,30 @@ def compute_normal_analysis(values: List[float]) -> Optional[dict]:
     }
 
 def format_table(values: List[float], title: str = "Результаты") -> str:
-    """Формирует текстовую таблицу с полосами для визуализации."""
+    """Формирует текстовую таблицу с полосами для визуализации.
+       Для вероятностей (0..1) умножаем на 10; для оценок (0..10) используем значение напрямую.
+       Автоматически определяем по диапазону."""
     lines = []
     lines.append(f"📊 *{title}*")
     lines.append("```")
-    # Заголовок
     lines.append(f"{'№':<4} {'Значение':<10} {'Визуализация'}")
     lines.append("-" * 40)
-    for i, v in enumerate(values, 1):
-        filled = int(round(v * 10))  # 0..10
-        filled = max(0, min(filled, 10))
-        bar = "█" * filled + "░" * (10 - filled)
-        lines.append(f"{i:<4} {v:>8.4f}  {bar}")
+    # Определяем, вероятности это (0..1) или оценки (0..10)
+    max_val = max(values) if values else 1
+    if max_val <= 1.0:
+        # для вероятностей
+        for i, v in enumerate(values, 1):
+            filled = int(round(v * 10))
+            filled = max(0, min(filled, 10))
+            bar = "█" * filled + "░" * (10 - filled)
+            lines.append(f"{i:<4} {v:>8.4f}  {bar}")
+    else:
+        # для оценок 0..10
+        for i, v in enumerate(values, 1):
+            filled = int(round(v))
+            filled = max(0, min(filled, 10))
+            bar = "█" * filled + "░" * (10 - filled)
+            lines.append(f"{i:<4} {v:>8.2f}  {bar}")
     lines.append("```")
     return "\n".join(lines)
 
@@ -465,7 +490,7 @@ async def monitor_process_day(message: Message, state: FSMContext):
             parse_mode="Markdown"
         )
 
-# ---- Функция расчёта результатов мониторинга (аналогична предыдущей) ----
+# ---- Функция расчёта результатов мониторинга (исправлена) ----
 def compute_monitor_results(days: List[float]) -> str:
     n = len(days)
     mean = sum(days) / n
@@ -476,10 +501,14 @@ def compute_monitor_results(days: List[float]) -> str:
     ci_low = mean - margin
     ci_high = mean + margin
 
-    prior = 0.02
-    likelihood = 0.6
-    evidence = 0.6
+    # === ИСПРАВЛЕНА БАЙЕСОВСКАЯ ВЕРОЯТНОСТЬ ===
+    prior = 0.02            # априорная вероятность ОКР (фиксирована)
+    likelihood = 0.6        # P(симптом | ОКР)
+    false_positive = 0.1    # P(симптом | ¬ОКР) – теперь явно задано
+    # Правильная полная вероятность симптома:
+    evidence = likelihood * prior + false_positive * (1 - prior)
     posterior = (likelihood * prior) / evidence if evidence != 0 else 0
+    # =========================================
 
     last_value = days[-1]
     if last_value < ci_low:
@@ -489,7 +518,7 @@ def compute_monitor_results(days: List[float]) -> str:
     else:
         diagnosis = "🟡 В пределах нормы – продолжайте наблюдение"
 
-    # Таблица с визуализацией
+    # Таблица с визуализацией (теперь корректно отображает 0–10)
     table = format_table(days, "Ежедневные значения")
 
     report = (
@@ -509,4 +538,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())in
+    asyncio.run(main())
